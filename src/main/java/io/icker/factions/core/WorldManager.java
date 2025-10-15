@@ -1,0 +1,85 @@
+package io.icker.factions.core;
+
+import io.icker.factions.FactionsMod;
+import io.icker.factions.api.events.MiscEvents;
+import io.icker.factions.api.events.PlayerEvents;
+import io.icker.factions.api.persistents.Claim;
+import io.icker.factions.api.persistents.Faction;
+import io.icker.factions.api.persistents.User;
+import io.icker.factions.util.FactionsSafe;
+import io.icker.factions.util.Message;
+
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
+import net.minecraft.util.math.ChunkPos;
+
+public class WorldManager {
+    public static void register() {
+        PlayerEvents.ON_MOVE.register(WorldManager::onMove);
+        MiscEvents.ON_MOB_SPAWN_ATTEMPT.register(WorldManager::onMobSpawnAttempt);
+    }
+
+    private static void onMobSpawnAttempt() {
+        // TODO Implement this
+    }
+
+    private static void onMove(ServerPlayerEntity player) {
+        // Defer to main thread to avoid chunk loading from network thread
+        player.getEntityWorld().getServer().execute(() -> {
+            User user = User.get(player.getUuid());
+            ServerWorld world = player.getEntityWorld();
+            String dimension = world.getRegistryKey().getValue().toString();
+
+            // Use getChunkManager().getWorldChunk which returns null if not loaded
+            // instead of forcing a load
+            ChunkPos chunkPos = new ChunkPos(player.getBlockPos());
+
+            // Alternative: Check if chunk is loaded first
+            if (!world.getChunkManager().isChunkLoaded(chunkPos.x, chunkPos.z)) {
+                return; // Skip processing if chunk isn't loaded
+            }
+
+            Claim claim = Claim.get(chunkPos.x, chunkPos.z, dimension);
+
+            if (user.autoclaim && claim == null) {
+                Faction faction = user.getFaction();
+                int requiredPower = FactionsSafe.requiredPowerToClaim(faction, FactionsMod.CONFIG.POWER.CLAIM_WEIGHT);
+                int maxPower =
+                        faction.getUsers().size() * FactionsMod.CONFIG.POWER.MEMBER
+                                + FactionsMod.CONFIG.POWER.BASE
+                                + faction.getAdminPower();
+
+                if (maxPower < requiredPower) {
+                    new Message(Text.translatable("factions.events.autoclaim.fail"))
+                            .fail()
+                            .send(player, false);
+                    user.autoclaim = false;
+                } else {
+                    faction.addClaim(chunkPos.x, chunkPos.z, dimension);
+                    claim = Claim.get(chunkPos.x, chunkPos.z, dimension);
+                    new Message(
+                            Text.translatable(
+                                    "factions.events.autoclaim.success",
+                                    chunkPos.x,
+                                    chunkPos.z,
+                                    player.getName().getString()))
+                            .send(faction);
+                }
+            }
+
+            if (user.radar) {
+                if (claim != null) {
+                    new Message(claim.getFaction().getName())
+                            .format(claim.getFaction().getColor())
+                            .send(player, true);
+                } else {
+                    new Message(Text.translatable("factions.radar.wilderness"))
+                            .format(Formatting.GREEN)
+                            .send(player, true);
+                }
+            }
+        });
+    }
+}
